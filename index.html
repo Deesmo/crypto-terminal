@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#080a0f">
+<meta name="mobile-web-app-capable" content="yes">
+<title>CryptoAI Terminal</title>
+<link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiQ3J5cHRvQUkgVGVybWluYWwiLCJzaG9ydF9uYW1lIjoiQ3J5cHRvQUkiLCJzdGFydF91cmwiOiIuIiwiZGlzcGxheSI6InN0YW5kYWxvbmUiLCJiYWNrZ3JvdW5kX2NvbG9yIjoiIzA4MGEwZiIsInRoZW1lX2NvbG9yIjoiIzA4MGEwZiJ9">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body, #root { height: 100%; width: 100%; overflow-x: hidden; }
+  body { background: #080a0f; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.5} }
+  @keyframes slideUp { from { opacity:0; transform: translateY(12px); } to { opacity:1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script>
+const { useState, useEffect, useRef, useCallback, createElement: h } = React;
+
+// ═══════════════════════════════════════
+// TECHNICAL INDICATORS
+// ═══════════════════════════════════════
+
+const calcSMA = (data, period) => {
+  const r = [];
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) { r.push(null); continue; }
+    let s = 0; for (let j = i - period + 1; j <= i; j++) s += data[j];
+    r.push(s / period);
+  }
+  return r;
+};
+
+const calcEMA = (data, period) => {
+  const r = []; const k = 2 / (period + 1);
+  let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) { r.push(null); continue; }
+    if (i === period - 1) { r.push(ema); continue; }
+    ema = data[i] * k + ema * (1 - k); r.push(ema);
+  }
+  return r;
+};
+
+const calcRSI = (closes, period = 14) => {
+  const r = []; let gains = 0, losses = 0;
+  for (let i = 0; i < closes.length; i++) {
+    if (i === 0) { r.push(null); continue; }
+    const diff = closes[i] - closes[i - 1];
+    if (i <= period) {
+      if (diff > 0) gains += diff; else losses -= diff;
+      if (i < period) { r.push(null); continue; }
+      gains /= period; losses /= period;
+    } else {
+      const d = diff > 0 ? diff : 0, l = diff < 0 ? -diff : 0;
+      gains = (gains * (period - 1) + d) / period;
+      losses = (losses * (period - 1) + l) / period;
+    }
+    const rs = losses === 0 ? 100 : gains / losses;
+    r.push(100 - 100 / (1 + rs));
+  }
+  return r;
+};
+
+const calcMACD = (closes) => {
+  const ema12 = calcEMA(closes, 12), ema26 = calcEMA(closes, 26);
+  const macdLine = ema12.map((v, i) => (v !== null && ema26[i] !== null) ? v - ema26[i] : null);
+  const validM = macdLine.filter(v => v !== null);
+  const sigRaw = calcEMA(validM, 9);
+  const signal = []; let si = 0;
+  for (let i = 0; i < macdLine.length; i++) {
+    if (macdLine[i] === null) { signal.push(null); continue; }
+    signal.push(sigRaw[si] !== undefined ? sigRaw[si] : null); si++;
+  }
+  const histogram = macdLine.map((v, i) => (v !== null && signal[i] !== null) ? v - signal[i] : null);
+  return { macdLine, signal, histogram };
+};
+
+const calcBB = (closes, period = 20, mult = 2) => {
+  const sma = calcSMA(closes, period); const upper = [], lower = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (sma[i] === null) { upper.push(null); lower.push(null); continue; }
+    let v = 0; for (let j = i - period + 1; j <= i; j++) v += Math.pow(closes[j] - sma[i], 2);
+    const std = Math.sqrt(v / period);
+    upper.push(sma[i] + mult * std); lower.push(sma[i] - mult * std);
+  }
+  return { upper, middle: sma, lower };
+};
+
+const calcStochastic = (candles, kPeriod = 14, dPeriod = 3) => {
+  const kValues = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i < kPeriod - 1) { kValues.push(null); continue; }
+    let hh = -Infinity, ll = Infinity;
+    for (let j = i - kPeriod + 1; j <= i; j++) { hh = Math.max(hh, candles[j].high); ll = Math.min(ll, candles[j].low); }
+    const k = hh === ll ? 50 : ((candles[i].close - ll) / (hh - ll)) * 100;
+    kValues.push(k);
+  }
+  const dValues = calcSMA(kValues.map(v => v === null ? 0 : v), dPeriod);
+  return { k: kValues, d: dValues };
+};
+
+const calcATR = (candles, period = 14) => {
+  const trs = []; const atr = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i === 0) { trs.push(candles[i].high - candles[i].low); atr.push(null); continue; }
+    const tr = Math.max(candles[i].high - candles[i].low, Math.abs(candles[i].high - candles[i-1].close), Math.abs(candles[i].low - candles[i-1].close));
+    trs.push(tr);
+    if (i < period) { atr.push(null); continue; }
+    if (i === period) { atr.push(trs.slice(0, period + 1).reduce((a,b) => a+b, 0) / (period + 1)); continue; }
+    atr.push((atr[atr.length-1] * (period-1) + tr) / period);
+  }
+  return atr;
+};
+
+const calcFib = (high, low) => {
+  const d = high - low;
+  return { "0.0%": high, "23.6%": high - d*.236, "38.2%": high - d*.382, "50.0%": high - d*.5, "61.8%": high - d*.618, "78.6%": high - d*.786, "100%": low };
+};
+
+const calcGann = (price) => [
+  { label: "Gann +2", value: Math.pow(Math.sqrt(price)+2,2) },
+  { label: "Gann +1", value: Math.pow(Math.sqrt(price)+1,2) },
+  { label: "Gann 0", value: price },
+  { label: "Gann -1", value: Math.pow(Math.max(Math.sqrt(price)-1,0),2) },
+  { label: "Gann -2", value: Math.pow(Math.max(Math.sqrt(price)-2,0),2) },
+];
+
+const calcVWAP = (candles) => {
+  const r = []; let cumVol = 0, cumTP = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const tp = (candles[i].high + candles[i].low + candles[i].close) / 3;
+    const vol = candles[i].volume || 1;
+    cumTP += tp * vol; cumVol += vol;
+    r.push(cumVol > 0 ? cumTP / cumVol : null);
+  }
+  return r;
+};
+
+const detectPatterns = (candles) => {
+  const p = []; const len = candles.length; if (len < 3) return p;
+  for (let i = 2; i < len; i++) {
+    const c = candles[i], prev = candles[i-1], pp = candles[i-2];
+    const body = Math.abs(c.close - c.open);
+    const uw = c.high - Math.max(c.open, c.close);
+    const lw = Math.min(c.open, c.close) - c.low;
+    const range = c.high - c.low;
+    const bull = c.close > c.open;
+    const pBody = Math.abs(prev.close - prev.open);
+    const pBull = prev.close > prev.open;
+    if (range > 0 && body / range < 0.1) p.push({ index: i, name: "Doji", type: "neutral", icon: "✚" });
+    if (lw > body * 2 && uw < body * 0.5 && !bull && i > 3 && candles[i-1].close < candles[i-3].close) p.push({ index: i, name: "Hammer", type: "bullish", icon: "🔨" });
+    if (uw > body * 2 && lw < body * 0.5 && i > 3 && candles[i-1].close > candles[i-3].close) p.push({ index: i, name: "Shooting Star", type: "bearish", icon: "⭐" });
+    if (bull && !pBull && c.open <= prev.close && c.close >= prev.open && body > pBody) p.push({ index: i, name: "Bullish Engulfing", type: "bullish", icon: "🟢" });
+    if (!bull && pBull && c.open >= prev.close && c.close <= prev.open && body > pBody) p.push({ index: i, name: "Bearish Engulfing", type: "bearish", icon: "🔴" });
+    const ppBody = Math.abs(pp.close - pp.open);
+    if (pp.close < pp.open && ppBody > 0 && pBody < ppBody * 0.3 && bull && body > ppBody * 0.5) p.push({ index: i, name: "Morning Star", type: "bullish", icon: "🌅" });
+    if (pp.close > pp.open && ppBody > 0 && pBody < ppBody * 0.3 && !bull && body > ppBody * 0.5) p.push({ index: i, name: "Evening Star", type: "bearish", icon: "🌆" });
+    // Three White Soldiers
+    if (i >= 2 && candles[i].close > candles[i].open && candles[i-1].close > candles[i-1].open && candles[i-2].close > candles[i-2].open && candles[i].close > candles[i-1].close && candles[i-1].close > candles[i-2].close) p.push({ index: i, name: "Three White Soldiers", type: "bullish", icon: "🪖" });
+    // Three Black Crows
+    if (i >= 2 && candles[i].close < candles[i].open && candles[i-1].close < candles[i-1].open && candles[i-2].close < candles[i-2].open && candles[i].close < candles[i-1].close && candles[i-1].close < candles[i-2].close) p.push({ index: i, name: "Three Black Crows", type: "bearish", icon: "🐦‍⬛" });
+  }
+  // Double Top / Bottom
+  const highs = candles.map(c => c.high), lows = candles.map(c => c.low);
+  const tol = (Math.max(...highs) - Math.min(...lows)) * 0.02;
+  const tops = [], bots = [];
+  for (let i = 2; i < len - 2; i++) {
+    if (highs[i] > highs[i-1] && highs[i] > highs[i-2] && highs[i] > highs[i+1] && highs[i] > highs[i+2]) tops.push(i);
+    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2]) bots.push(i);
+  }
+  for (let a = 0; a < tops.length; a++) for (let b = a+1; b < tops.length; b++)
+    if (Math.abs(highs[tops[a]] - highs[tops[b]]) < tol && tops[b] - tops[a] > 5) p.push({ index: tops[b], name: "Double Top", type: "bearish", icon: "⛰️" });
+  for (let a = 0; a < bots.length; a++) for (let b = a+1; b < bots.length; b++)
+    if (Math.abs(lows[bots[a]] - lows[bots[b]]) < tol && bots[b] - bots[a] > 5) p.push({ index: bots[b], name: "Double Bottom", type: "bullish", icon: "🏜️" });
+  return p;
+};
+
+// ═══════════════════════════════════════
+// COINS & CONFIG
+// ═══════════════════════════════════════
+
+const COINS = [
+  { id: "bitcoin", sym: "BTC", name: "Bitcoin", icon: "₿" },
+  { id: "ethereum", sym: "ETH", name: "Ethereum", icon: "Ξ" },
+  { id: "solana", sym: "SOL", name: "Solana", icon: "◎" },
+  { id: "ripple", sym: "XRP", name: "XRP", icon: "✕" },
+  { id: "dogecoin", sym: "DOGE", name: "Dogecoin", icon: "Ð" },
+  { id: "cardano", sym: "ADA", name: "Cardano", icon: "₳" },
+  { id: "avalanche-2", sym: "AVAX", name: "Avalanche", icon: "▲" },
+  { id: "chainlink", sym: "LINK", name: "Chainlink", icon: "⬡" },
+  { id: "polkadot", sym: "DOT", name: "Polkadot", icon: "●" },
+  { id: "sui", sym: "SUI", name: "Sui", icon: "💧" },
+];
+
+const TIMEFRAMES = [
+  { label: "1D", days: 1 }, { label: "7D", days: 7 }, { label: "14D", days: 14 },
+  { label: "30D", days: 30 }, { label: "90D", days: 90 }, { label: "180D", days: 180 },
+];
+
+const fmt = (n, dec) => {
+  if (n == null) return "—";
+  if (n >= 1000) return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n >= 1) return "$" + n.toFixed(dec || 2);
+  return "$" + n.toFixed(dec || 6);
+};
+
+// ═══════════════════════════════════════
+// CHART RENDERER
+// ═══════════════════════════════════════
+
+function ChartCanvas({ candles, indicators, fibLevels, gannLevels, patterns, show }) {
+  const mainRef = useRef(null);
+  const rsiRef = useRef(null);
+  const macdRef = useRef(null);
+  const volRef = useRef(null);
+  const stochRef = useRef(null);
+
+  useEffect(() => {
+    if (!candles || candles.length === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+
+    function setupCanvas(ref) {
+      if (!ref.current) return null;
+      const c = ref.current, ctx = c.getContext("2d");
+      const W = c.clientWidth, H = c.clientHeight;
+      c.width = W * dpr; c.height = H * dpr;
+      ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
+      return { ctx, W, H };
+    }
+
+    // MAIN CHART
+    const m = setupCanvas(mainRef);
+    if (m) {
+      const { ctx, W, H } = m;
+      const pad = { top: 10, right: 58, bottom: 18, left: 6 };
+      const cw = W - pad.left - pad.right, ch = H - pad.top - pad.bottom;
+      const allH = candles.map(c => c.high), allL = candles.map(c => c.low);
+      let minP = Math.min(...allL), maxP = Math.max(...allH);
+      if (show.bollinger && indicators.bb) {
+        indicators.bb.upper.forEach(v => { if (v) maxP = Math.max(maxP, v); });
+        indicators.bb.lower.forEach(v => { if (v) minP = Math.min(minP, v); });
+      }
+      if (show.vwap && indicators.vwap) {
+        indicators.vwap.forEach(v => { if (v) { maxP = Math.max(maxP, v); minP = Math.min(minP, v); }});
+      }
+      const pr = maxP - minP || 1; minP -= pr * 0.02; maxP += pr * 0.02;
+      const priceRange = maxP - minP;
+      const toX = i => pad.left + (i / (candles.length - 1)) * cw;
+      const toY = p => pad.top + (1 - (p - minP) / priceRange) * ch;
+
+      // Grid
+      ctx.strokeStyle = "rgba(255,255,255,0.035)"; ctx.lineWidth = 1;
+      for (let i = 0; i <= 6; i++) {
+        const y = pad.top + (i / 6) * ch;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+        const price = maxP - (i / 6) * priceRange;
+        ctx.fillStyle = "#4a5568"; ctx.font = "9px monospace"; ctx.textAlign = "left";
+        ctx.fillText(price >= 100 ? price.toFixed(0) : price >= 1 ? price.toFixed(2) : price.toFixed(6), W - pad.right + 3, y + 3);
+      }
+
+      // Fib
+      if (show.fib && fibLevels) {
+        const fc = ["#f59e0b88","#f59e0b66","#f59e0b55","#f59e0b44","#f59e0b55","#f59e0b66","#f59e0b88"];
+        Object.entries(fibLevels).forEach(([label, price], idx) => {
+          if (price >= minP && price <= maxP) {
+            const y = toY(price);
+            ctx.strokeStyle = fc[idx] || "#f59e0b44"; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = "#f59e0b88"; ctx.font = "8px monospace"; ctx.textAlign = "right";
+            ctx.fillText("Fib " + label, W - pad.right - 2, y - 2);
+          }
+        });
+      }
+
+      // Gann
+      if (show.gann && gannLevels) {
+        gannLevels.forEach(g => {
+          if (g.value >= minP && g.value <= maxP) {
+            const y = toY(g.value);
+            ctx.strokeStyle = "rgba(236,72,153,0.25)"; ctx.setLineDash([2,6]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = "rgba(236,72,153,0.5)"; ctx.font = "8px monospace"; ctx.textAlign = "left";
+            ctx.fillText(g.label, pad.left + 2, y - 2);
+          }
+        });
+      }
+
+      // Bollinger Bands
+      if (show.bollinger && indicators.bb) {
+        const { upper: bu, middle: bm, lower: bl } = indicators.bb;
+        ctx.beginPath(); let s = false;
+        for (let i = 0; i < candles.length; i++) { if (!bu[i]) continue; if (!s) { ctx.moveTo(toX(i), toY(bu[i])); s = true; } else ctx.lineTo(toX(i), toY(bu[i])); }
+        for (let i = candles.length - 1; i >= 0; i--) { if (bl[i]) ctx.lineTo(toX(i), toY(bl[i])); }
+        ctx.closePath(); ctx.fillStyle = "rgba(99,102,241,0.05)"; ctx.fill();
+        [{ d: bu, c: "rgba(99,102,241,0.35)" }, { d: bm, c: "rgba(99,102,241,0.2)" }, { d: bl, c: "rgba(99,102,241,0.35)" }].forEach(({ d, c }) => {
+          ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.beginPath(); let st = false;
+          d.forEach((v, i) => { if (!v) return; if (!st) { ctx.moveTo(toX(i), toY(v)); st = true; } else ctx.lineTo(toX(i), toY(v)); }); ctx.stroke();
+        });
+      }
+
+      // MAs + VWAP
+      const lines = [
+        { key: "sma20", data: indicators.sma20, color: "#fbbf24" },
+        { key: "sma50", data: indicators.sma50, color: "#34d399" },
+        { key: "ema12", data: indicators.ema12, color: "#f472b6" },
+        { key: "ema26", data: indicators.ema26, color: "#c084fc" },
+        { key: "vwap", data: indicators.vwap, color: "#06b6d4" },
+      ];
+      lines.forEach(({ key, data, color }) => {
+        if (!show[key] || !data) return;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath(); let st = false;
+        data.forEach((v, i) => { if (!v) return; if (!st) { ctx.moveTo(toX(i), toY(v)); st = true; } else ctx.lineTo(toX(i), toY(v)); }); ctx.stroke();
+      });
+
+      // Candles
+      const candW = Math.max(1, (cw / candles.length) * 0.7);
+      const wickW = Math.max(1, candW * 0.15);
+      candles.forEach((c, i) => {
+        const x = toX(i), bull = c.close >= c.open;
+        ctx.fillStyle = bull ? "#22c55e99" : "#ef444499";
+        ctx.fillRect(x - wickW / 2, toY(c.high), wickW, toY(c.low) - toY(c.high));
+        const oY = toY(c.open), cY = toY(c.close);
+        ctx.fillStyle = bull ? "#22c55e" : "#ef4444";
+        ctx.fillRect(x - candW / 2, Math.min(oY, cY), candW, Math.max(1, Math.abs(oY - cY)));
+      });
+
+      // Pattern markers
+      if (show.patterns && patterns) {
+        patterns.forEach(p => {
+          if (p.index >= candles.length) return;
+          ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+          ctx.fillText(p.icon, toX(p.index), toY(candles[p.index].high) - 12);
+        });
+      }
+    }
+
+    // RSI
+    if (show.rsi && indicators.rsi && rsiRef.current) {
+      const r = setupCanvas(rsiRef);
+      if (r) {
+        const { ctx, W, H } = r;
+        const p = { top: 4, right: 58, bottom: 4, left: 6 };
+        const cw2 = W - p.left - p.right, ch2 = H - p.top - p.bottom;
+        ctx.fillStyle = "rgba(255,255,255,0.015)"; ctx.fillRect(0, 0, W, H);
+        const rToX = i => p.left + (i / (candles.length - 1)) * cw2;
+        const rToY = v => p.top + (1 - v / 100) * ch2;
+        ctx.fillStyle = "rgba(239,68,68,0.05)"; ctx.fillRect(p.left, rToY(100), cw2, rToY(70) - rToY(100));
+        ctx.fillStyle = "rgba(34,197,94,0.05)"; ctx.fillRect(p.left, rToY(30), cw2, rToY(0) - rToY(30));
+        [70,50,30].forEach(l => { ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.setLineDash([2,4]); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(p.left, rToY(l)); ctx.lineTo(W-p.right, rToY(l)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = "#4a556866"; ctx.font = "8px monospace"; ctx.textAlign = "left"; ctx.fillText(l, W-p.right+3, rToY(l)+3); });
+        ctx.strokeStyle = "#a78bfa"; ctx.lineWidth = 1.5; ctx.beginPath(); let s = false;
+        indicators.rsi.forEach((v, i) => { if (!v) return; if (!s) { ctx.moveTo(rToX(i), rToY(v)); s = true; } else ctx.lineTo(rToX(i), rToY(v)); }); ctx.stroke();
+        ctx.fillStyle = "#64748b"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "left"; ctx.fillText("RSI(14)", p.left + 2, p.top + 10);
+      }
+    }
+
+    // Stochastic
+    if (show.stoch && indicators.stoch && stochRef.current) {
+      const r = setupCanvas(stochRef);
+      if (r) {
+        const { ctx, W, H } = r;
+        const p = { top: 4, right: 58, bottom: 4, left: 6 };
+        const cw2 = W - p.left - p.right, ch2 = H - p.top - p.bottom;
+        ctx.fillStyle = "rgba(255,255,255,0.015)"; ctx.fillRect(0, 0, W, H);
+        const sToX = i => p.left + (i / (candles.length - 1)) * cw2;
+        const sToY = v => p.top + (1 - v / 100) * ch2;
+        ctx.fillStyle = "rgba(239,68,68,0.05)"; ctx.fillRect(p.left, sToY(100), cw2, sToY(80) - sToY(100));
+        ctx.fillStyle = "rgba(34,197,94,0.05)"; ctx.fillRect(p.left, sToY(20), cw2, sToY(0) - sToY(20));
+        [80,50,20].forEach(l => { ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.setLineDash([2,4]); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(p.left, sToY(l)); ctx.lineTo(W-p.right, sToY(l)); ctx.stroke(); ctx.setLineDash([]); });
+        [{ d: indicators.stoch.k, c: "#60a5fa" }, { d: indicators.stoch.d, c: "#f97316" }].forEach(({ d, c }) => {
+          ctx.strokeStyle = c; ctx.lineWidth = 1.2; ctx.beginPath(); let s = false;
+          d.forEach((v, i) => { if (!v) return; if (!s) { ctx.moveTo(sToX(i), sToY(v)); s = true; } else ctx.lineTo(sToX(i), sToY(v)); }); ctx.stroke();
+        });
+        ctx.fillStyle = "#64748b"; ctx.font = "bold 9px sans-serif"; ctx.fillText("Stoch(14,3)", p.left + 2, p.top + 10);
+      }
+    }
+
+    // MACD
+    if (show.macd && indicators.macd && macdRef.current) {
+      const r = setupCanvas(macdRef);
+      if (r) {
+        const { ctx, W, H } = r;
+        const p = { top: 4, right: 58, bottom: 4, left: 6 };
+        const cw2 = W - p.left - p.right, ch2 = H - p.top - p.bottom;
+        ctx.fillStyle = "rgba(255,255,255,0.015)"; ctx.fillRect(0, 0, W, H);
+        const { macdLine: ml, signal: sl, histogram: hist } = indicators.macd;
+        const all = [...ml, ...sl, ...hist].filter(v => v !== null);
+        if (all.length > 0) {
+          let mn = Math.min(...all), mx = Math.max(...all);
+          const mr = mx - mn || 1; mn -= mr * 0.1; mx += mr * 0.1;
+          const mRange = mx - mn;
+          const mToX = i => p.left + (i / (candles.length - 1)) * cw2;
+          const mToY = v => p.top + (1 - (v - mn) / mRange) * ch2;
+          if (mn < 0 && mx > 0) { ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(p.left, mToY(0)); ctx.lineTo(W - p.right, mToY(0)); ctx.stroke(); }
+          const barW = Math.max(1, (cw2 / candles.length) * 0.6);
+          hist.forEach((v, i) => { if (!v) return; const zy = mToY(0), vy = mToY(v); ctx.fillStyle = v >= 0 ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"; ctx.fillRect(mToX(i) - barW/2, Math.min(zy, vy), barW, Math.abs(vy - zy)); });
+          [{ d: ml, c: "#60a5fa" }, { d: sl, c: "#f97316" }].forEach(({ d, c }) => { ctx.strokeStyle = c; ctx.lineWidth = 1.5; ctx.beginPath(); let s = false; d.forEach((v, i) => { if (!v) return; if (!s) { ctx.moveTo(mToX(i), mToY(v)); s = true; } else ctx.lineTo(mToX(i), mToY(v)); }); ctx.stroke(); });
+        }
+        ctx.fillStyle = "#64748b"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "left"; ctx.fillText("MACD(12,26,9)", p.left + 2, p.top + 10);
+      }
+    }
+
+    // Volume
+    if (show.volume && volRef.current) {
+      const r = setupCanvas(volRef);
+      if (r) {
+        const { ctx, W, H } = r;
+        const p = { top: 4, right: 58, bottom: 4, left: 6 };
+        const cw2 = W - p.left - p.right, ch2 = H - p.top - p.bottom;
+        ctx.fillStyle = "rgba(255,255,255,0.015)"; ctx.fillRect(0, 0, W, H);
+        const maxV = Math.max(...candles.map(c => c.volume || 0)) || 1;
+        const bw = Math.max(1, (cw2 / candles.length) * 0.7);
+        candles.forEach((c, i) => { if (!c.volume) return; const x = p.left + (i / (candles.length - 1)) * cw2; const ht = (c.volume / maxV) * ch2; ctx.fillStyle = c.close >= c.open ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"; ctx.fillRect(x - bw/2, p.top + ch2 - ht, bw, ht); });
+        ctx.fillStyle = "#64748b"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "left"; ctx.fillText("VOLUME", p.left + 2, p.top + 10);
+      }
+    }
+  }, [candles, indicators, fibLevels, gannLevels, patterns, show]);
+
+  return h("div", null,
+    h("canvas", { ref: mainRef, style: { width: "100%", height: 280, display: "block" } }),
+    show.rsi && h("canvas", { ref: rsiRef, style: { width: "100%", height: 65, display: "block", marginTop: 2 } }),
+    show.stoch && h("canvas", { ref: stochRef, style: { width: "100%", height: 65, display: "block", marginTop: 2 } }),
+    show.macd && h("canvas", { ref: macdRef, style: { width: "100%", height: 65, display: "block", marginTop: 2 } }),
+    show.volume && h("canvas", { ref: volRef, style: { width: "100%", height: 50, display: "block", marginTop: 2 } }),
+  );
+}
+
+// ═══════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════
+
+function App() {
+  const [coin, setCoin] = useState(COINS[0]);
+  const [tf, setTf] = useState(TIMEFRAMES[3]);
+  const [candles, setCandles] = useState([]);
+  const [prices, setPrices] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [picker, setPicker] = useState(false);
+  const [indicators, setIndicators] = useState({});
+  const [fibLevels, setFibLevels] = useState(null);
+  const [gannLevels, setGannLevels] = useState(null);
+  const [patterns, setPatterns] = useState([]);
+  const [aiResult, setAiResult] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [show, setShow] = useState({
+    sma20: true, sma50: true, ema12: false, ema26: false,
+    bollinger: true, rsi: true, macd: true, volume: true,
+    stoch: false, vwap: false, fib: true, gann: false, patterns: true,
+  });
+
+  const toggle = k => setShow(p => ({ ...p, [k]: !p[k] }));
+
+  const fetchOHLC = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("https://api.coingecko.com/api/v3/coins/" + coin.id + "/ohlc?vs_currency=usd&days=" + tf.days);
+      const data = await res.json();
+      if (!Array.isArray(data)) { setLoading(false); return; }
+      const parsed = data.map(d => ({ time: d[0], open: d[1], high: d[2], low: d[3], close: d[4], volume: 0 }));
+      try {
+        const vRes = await fetch("https://api.coingecko.com/api/v3/coins/" + coin.id + "/market_chart?vs_currency=usd&days=" + tf.days);
+        const vData = await vRes.json();
+        if (vData.total_volumes) {
+          const vols = vData.total_volumes;
+          parsed.forEach(c => { const cl = vols.reduce((b, v) => Math.abs(v[0]-c.time) < Math.abs(b[0]-c.time) ? v : b, vols[0]); c.volume = cl[1]; });
+        }
+      } catch(e) {}
+      setCandles(parsed);
+      const closes = parsed.map(c => c.close);
+      setIndicators({
+        sma20: calcSMA(closes, 20), sma50: calcSMA(closes, 50),
+        ema12: calcEMA(closes, 12), ema26: calcEMA(closes, 26),
+        rsi: calcRSI(closes), macd: calcMACD(closes), bb: calcBB(closes),
+        stoch: calcStochastic(parsed), atr: calcATR(parsed), vwap: calcVWAP(parsed),
+      });
+      const hi = Math.max(...parsed.map(c => c.high)), lo = Math.min(...parsed.map(c => c.low));
+      setFibLevels(calcFib(hi, lo));
+      setGannLevels(calcGann(closes[closes.length - 1]));
+      setPatterns(detectPatterns(parsed));
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  }, [coin.id, tf.days]);
+
+  const fetchPrices = useCallback(async () => {
+    try {
+      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=" + COINS.map(c => c.id).join(",") + "&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true");
+      setPrices(await res.json());
+    } catch(e) {}
+  }, []);
+
+  useEffect(() => { fetchOHLC(); }, [fetchOHLC]);
+  useEffect(() => { fetchPrices(); const iv = setInterval(fetchPrices, 30000); return () => clearInterval(iv); }, [fetchPrices]);
+
+  const cp = prices[coin.id];
+  const lastRSI = indicators.rsi ? [...indicators.rsi].reverse().find(v => v !== null) : null;
+  const lastMACD = indicators.macd?.histogram ? [...indicators.macd.histogram].reverse().find(v => v !== null) : null;
+  const lastStochK = indicators.stoch?.k ? [...indicators.stoch.k].reverse().find(v => v !== null) : null;
+  const lastATR = indicators.atr ? [...indicators.atr].reverse().find(v => v !== null) : null;
+
+  const runAI = async () => {
+    setAiLoading(true); setAiResult(null);
+    try {
+      const closes = candles.map(c => c.close);
+      const lp = cp?.usd || closes[closes.length-1];
+      const ch24 = cp?.usd_24h_change?.toFixed(2) || "N/A";
+      const rsiV = lastRSI?.toFixed(1) || "N/A";
+      const macdH = lastMACD?.toFixed(6) || "N/A";
+      const ml = indicators.macd?.macdLine ? [...indicators.macd.macdLine].reverse().find(v => v !== null) : null;
+      const ms = indicators.macd?.signal ? [...indicators.macd.signal].reverse().find(v => v !== null) : null;
+      const s20 = indicators.sma20 ? [...indicators.sma20].reverse().find(v => v !== null) : null;
+      const s50 = indicators.sma50 ? [...indicators.sma50].reverse().find(v => v !== null) : null;
+      const bu = indicators.bb?.upper ? [...indicators.bb.upper].reverse().find(v => v !== null) : null;
+      const bl = indicators.bb?.lower ? [...indicators.bb.lower].reverse().find(v => v !== null) : null;
+      const stK = lastStochK?.toFixed(1) || "N/A";
+      const stD = indicators.stoch?.d ? [...indicators.stoch.d].reverse().find(v => v !== null)?.toFixed(1) : "N/A";
+      const atrV = lastATR?.toFixed(2) || "N/A";
+      const vwapV = indicators.vwap ? [...indicators.vwap].reverse().find(v => v !== null) : null;
+      const patStr = patterns.length > 0 ? [...new Map(patterns.map(p=>[p.name,p])).values()].map(p => p.name + "(" + p.type + ")").join(", ") : "None";
+      const fibStr = fibLevels ? Object.entries(fibLevels).map(([k,v]) => k + ": " + v.toFixed(2)).join(", ") : "N/A";
+      const gannStr = gannLevels ? gannLevels.map(g => g.label + ": " + g.value.toFixed(2)).join(", ") : "N/A";
+
+      const prompt = `You are an expert crypto technical analyst. Analyze ${coin.name} (${coin.sym}) with ALL data below:
+
+PRICE: $${lp} | 24h: ${ch24}% | Timeframe: ${tf.label}
+
+INDICATORS:
+- RSI(14): ${rsiV} ${lastRSI > 70 ? "(OVERBOUGHT)" : lastRSI < 30 ? "(OVERSOLD)" : ""}
+- Stochastic %K: ${stK} | %D: ${stD} ${lastStochK > 80 ? "(OVERBOUGHT)" : lastStochK < 20 ? "(OVERSOLD)" : ""}
+- MACD Line: ${ml?.toFixed(6)||"N/A"} | Signal: ${ms?.toFixed(6)||"N/A"} | Histogram: ${macdH} ${lastMACD > 0 ? "(BULLISH)" : "(BEARISH)"}
+- SMA(20): ${s20?.toFixed(2)||"N/A"} ${lp > s20 ? "(above)" : "(below)"} | SMA(50): ${s50?.toFixed(2)||"N/A"} ${lp > s50 ? "(above)" : "(below)"}
+- ${s20 && s50 ? (s20 > s50 ? "GOLDEN CROSS (SMA20 > SMA50)" : "DEATH CROSS (SMA20 < SMA50)") : ""}
+- Bollinger: Upper ${bu?.toFixed(2)||"N/A"} | Lower ${bl?.toFixed(2)||"N/A"} | Position: ${bu && bl ? ((lp-bl)/(bu-bl)*100).toFixed(0)+"%" : "N/A"}
+- ATR(14): ${atrV} (volatility measure)
+- VWAP: ${vwapV?.toFixed(2)||"N/A"} ${lp > vwapV ? "(price above VWAP = bullish)" : "(price below VWAP = bearish)"}
+
+FIBONACCI: ${fibStr}
+GANN LEVELS: ${gannStr}
+PATTERNS: ${patStr}
+
+Search latest ${coin.name} news, whale activity, funding rates, open interest, and market sentiment.
+
+Respond ONLY with JSON:
+{"signal":"STRONG BUY/BUY/HOLD/SELL/STRONG SELL","position":"LONG/SHORT/NEUTRAL","confidence":0-100,"entry":"price","stopLoss":"price","target1":"price","target2":"price","target3":"price","timeframe":"period","rsiAnalysis":"text","stochAnalysis":"text","macdAnalysis":"text","trendAnalysis":"text","patternAnalysis":"text","fibAnalysis":"text","gannAnalysis":"text","volumeAnalysis":"text","newsAnalysis":"text","reasoning":"3-4 sentence synthesis","risks":"2 sentences","keyLevels":{"support":"price","resistance":"price"}}`;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, tools: [{ type: "web_search_20250305", name: "web_search" }], messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      const text = data.content.filter(b => b.type === "text").map(b => b.text).join("\n");
+      setAiResult(JSON.parse(text.replace(/```json|```/g, "").trim()));
+    } catch (e) { console.error(e); setAiResult({ error: "Analysis failed. Try again." }); }
+    setAiLoading(false);
+  };
+
+  const toggles = [
+    { key: "sma20", label: "SMA20", color: "#fbbf24" },
+    { key: "sma50", label: "SMA50", color: "#34d399" },
+    { key: "ema12", label: "EMA12", color: "#f472b6" },
+    { key: "ema26", label: "EMA26", color: "#c084fc" },
+    { key: "bollinger", label: "BB", color: "#818cf8" },
+    { key: "vwap", label: "VWAP", color: "#06b6d4" },
+    { key: "fib", label: "Fib", color: "#f59e0b" },
+    { key: "gann", label: "Gann", color: "#ec4899" },
+    { key: "rsi", label: "RSI", color: "#a78bfa" },
+    { key: "stoch", label: "Stoch", color: "#60a5fa" },
+    { key: "macd", label: "MACD", color: "#60a5fa" },
+    { key: "volume", label: "Vol", color: "#6ee7b7" },
+    { key: "patterns", label: "Patterns", color: "#fbbf24" },
+  ];
+
+  const sigColors = { "STRONG BUY": "#22c55e", "BUY": "#34d399", "HOLD": "#fbbf24", "SELL": "#f87171", "STRONG SELL": "#ef4444" };
+
+  return h("div", { style: { minHeight: "100vh", maxWidth: 520, margin: "0 auto" } },
+    // Top bar
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px", borderBottom: "1px solid #161b22", background: "rgba(255,255,255,0.02)" } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        h("span", { style: { fontSize: 16, color: "#818cf8", fontWeight: 700 } }, "◆"),
+        h("span", { style: { fontSize: 13, fontWeight: 700, color: "#a5b4fc" } }, "CryptoAI Terminal"),
+      ),
+      h("div", { style: { fontSize: 10, padding: "3px 8px", borderRadius: 6, background: "rgba(34,197,94,0.15)", color: "#22c55e", animation: "pulse 2s infinite", fontWeight: 600 } }, "● LIVE"),
+    ),
+
+    // Coin picker
+    h("div", { style: { padding: "10px 14px", borderBottom: "1px solid #161b22" } },
+      h("div", { onClick: () => setPicker(!picker), style: { display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", padding: "8px 12px", borderRadius: 10, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" } },
+        h("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+          h("span", { style: { fontSize: 20 } }, coin.icon),
+          h("div", null, h("span", { style: { fontWeight: 700, fontSize: 16 } }, coin.sym), h("span", { style: { color: "#64748b", fontSize: 11, marginLeft: 6 } }, coin.name)),
+        ),
+        cp ? h("div", { style: { textAlign: "right" } },
+          h("div", { style: { fontWeight: 700, fontSize: 15 } }, fmt(cp.usd)),
+          h("div", { style: { fontSize: 11, fontWeight: 600, color: cp.usd_24h_change >= 0 ? "#22c55e" : "#ef4444" } }, (cp.usd_24h_change >= 0 ? "▲ +" : "▼ ") + Math.abs(cp.usd_24h_change||0).toFixed(2) + "%"),
+        ) : h("span", { style: { color: "#64748b", fontSize: 12 } }, "Loading..."),
+      ),
+      picker && h("div", { style: { marginTop: 8, background: "#0d1117", borderRadius: 10, border: "1px solid #161b22", overflow: "hidden", animation: "fadeIn 0.2s", maxHeight: 300, overflowY: "auto" } },
+        COINS.map(c => h("div", { key: c.id, onClick: () => { setCoin(c); setPicker(false); setAiResult(null); }, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", cursor: "pointer", background: c.id === coin.id ? "rgba(99,102,241,0.1)" : "transparent", borderBottom: "1px solid #161b22" } },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, h("span", null, c.icon), h("span", { style: { fontWeight: 600, fontSize: 13 } }, c.sym), h("span", { style: { color: "#64748b", fontSize: 11 } }, c.name)),
+          prices[c.id] && h("div", { style: { textAlign: "right" } }, h("span", { style: { fontSize: 12, fontWeight: 600 } }, fmt(prices[c.id].usd)), h("span", { style: { marginLeft: 6, fontSize: 10, color: prices[c.id].usd_24h_change >= 0 ? "#22c55e" : "#ef4444" } }, (prices[c.id].usd_24h_change >= 0 ? "+" : "") + prices[c.id].usd_24h_change?.toFixed(1) + "%")),
+        )),
+      ),
+    ),
+
+    // Timeframes
+    h("div", { style: { display: "flex", gap: 4, padding: "8px 14px", borderBottom: "1px solid #161b22" } },
+      TIMEFRAMES.map(t => h("button", { key: t.label, onClick: () => { setTf(t); setAiResult(null); }, style: { flex: 1, padding: "6px 0", borderRadius: 6, border: "none", background: tf.label === t.label ? "rgba(99,102,241,0.2)" : "transparent", color: tf.label === t.label ? "#a5b4fc" : "#64748b", fontSize: 11, fontWeight: 700, cursor: "pointer" } }, t.label)),
+    ),
+
+    // Chart
+    h("div", { style: { position: "relative", borderBottom: "1px solid #161b22" } },
+      loading && h("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(8,10,15,0.8)", zIndex: 10 } },
+        h("div", { style: { width: 24, height: 24, border: "2px solid rgba(99,102,241,0.3)", borderTopColor: "#6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" } }),
+      ),
+      candles.length > 0 && h(ChartCanvas, { candles, indicators, fibLevels, gannLevels, patterns, show }),
+    ),
+
+    // Indicator quick stats
+    h("div", { style: { display: "flex", gap: 5, padding: "8px 14px", flexWrap: "wrap", borderBottom: "1px solid #161b22" } },
+      lastRSI !== null && h("div", { style: { padding: "3px 8px", borderRadius: 5, fontSize: 10, background: lastRSI > 70 ? "rgba(239,68,68,0.1)" : lastRSI < 30 ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.04)", color: lastRSI > 70 ? "#f87171" : lastRSI < 30 ? "#34d399" : "#94a3b8", fontWeight: 600 } }, "RSI: " + lastRSI.toFixed(1) + (lastRSI > 70 ? " ⚠OB" : lastRSI < 30 ? " ⚠OS" : "")),
+      lastStochK !== null && h("div", { style: { padding: "3px 8px", borderRadius: 5, fontSize: 10, background: lastStochK > 80 ? "rgba(239,68,68,0.1)" : lastStochK < 20 ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.04)", color: lastStochK > 80 ? "#f87171" : lastStochK < 20 ? "#34d399" : "#94a3b8", fontWeight: 600 } }, "Stoch: " + lastStochK.toFixed(0) + (lastStochK > 80 ? " ⚠OB" : lastStochK < 20 ? " ⚠OS" : "")),
+      lastMACD !== null && h("div", { style: { padding: "3px 8px", borderRadius: 5, fontSize: 10, background: lastMACD > 0 ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)", color: lastMACD > 0 ? "#34d399" : "#f87171", fontWeight: 600 } }, "MACD: " + (lastMACD > 0 ? "▲ Bull" : "▼ Bear")),
+      lastATR !== null && h("div", { style: { padding: "3px 8px", borderRadius: 5, fontSize: 10, background: "rgba(255,255,255,0.04)", color: "#94a3b8", fontWeight: 600 } }, "ATR: " + lastATR.toFixed(2)),
+      patterns.length > 0 && h("div", { style: { padding: "3px 8px", borderRadius: 5, fontSize: 10, background: "rgba(251,191,36,0.1)", color: "#fbbf24", fontWeight: 600 } }, patterns[patterns.length-1].icon + " " + patterns[patterns.length-1].name),
+    ),
+
+    // Toggles
+    h("div", { style: { padding: "10px 14px", borderBottom: "1px solid #161b22" } },
+      h("div", { style: { fontSize: 9, color: "#64748b", fontWeight: 700, marginBottom: 8, letterSpacing: "0.5px" } }, "INDICATORS"),
+      h("div", { style: { display: "flex", gap: 4, flexWrap: "wrap" } },
+        toggles.map(ind => h("button", { key: ind.key, onClick: () => toggle(ind.key), style: { padding: "4px 9px", borderRadius: 5, border: "1px solid", borderColor: show[ind.key] ? ind.color + "66" : "transparent", background: show[ind.key] ? ind.color + "18" : "rgba(255,255,255,0.03)", color: show[ind.key] ? ind.color : "#4a5568", fontSize: 10, fontWeight: 700, cursor: "pointer" } }, ind.label)),
+      ),
+    ),
+
+    // Detected patterns
+    patterns.length > 0 && show.patterns && h("div", { style: { padding: "10px 14px", borderBottom: "1px solid #161b22" } },
+      h("div", { style: { fontSize: 9, color: "#64748b", fontWeight: 700, marginBottom: 8, letterSpacing: "0.5px" } }, "DETECTED PATTERNS"),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+        [...new Map(patterns.map(p => [p.name, p])).values()].map((p, i) => h("div", { key: i, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", borderRadius: 7, background: "rgba(255,255,255,0.02)" } },
+          h("span", { style: { fontSize: 12, fontFamily: "Inter, sans-serif" } }, p.icon + " " + p.name),
+          h("span", { style: { fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 4, background: p.type === "bullish" ? "rgba(34,197,94,0.1)" : p.type === "bearish" ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.06)", color: p.type === "bullish" ? "#34d399" : p.type === "bearish" ? "#f87171" : "#94a3b8" } }, p.type.toUpperCase()),
+        )),
+      ),
+    ),
+
+    // AI Analysis
+    h("div", { style: { padding: "14px" } },
+      h("button", { onClick: runAI, disabled: aiLoading || candles.length === 0, style: { width: "100%", padding: "14px", borderRadius: 12, border: "none", background: aiLoading ? "rgba(99,102,241,0.2)" : "linear-gradient(135deg, #6366f1, #8b5cf6)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: aiLoading ? "wait" : "pointer", fontFamily: "Inter, sans-serif", boxShadow: aiLoading ? "none" : "0 4px 20px rgba(99,102,241,0.3)", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } },
+        aiLoading ? h("span", { style: { display: "flex", alignItems: "center", gap: 8 } }, h("span", { style: { width: 16, height: 16, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite", display: "inline-block" } }), "Analyzing All Indicators + News...") : "🤖 Run Full AI Analysis",
+      ),
+
+      aiResult && !aiResult.error && h("div", { style: { marginTop: 14, animation: "slideUp 0.4s" } },
+        // Signal
+        h("div", { style: { padding: 16, borderRadius: 14, marginBottom: 12, background: (sigColors[aiResult.signal]||"#fbbf24") + "11", border: "1px solid " + (sigColors[aiResult.signal]||"#fbbf24") + "44" } },
+          h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+            h("div", null,
+              h("div", { style: { fontSize: 9, color: "#64748b", fontWeight: 600, marginBottom: 4 } }, "AI SIGNAL"),
+              h("div", { style: { fontSize: 24, fontWeight: 700, color: sigColors[aiResult.signal] || "#fbbf24" } }, aiResult.signal),
+            ),
+            h("div", { style: { textAlign: "right" } },
+              h("span", { style: { padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, background: aiResult.position === "LONG" ? "rgba(34,197,94,0.15)" : aiResult.position === "SHORT" ? "rgba(239,68,68,0.15)" : "rgba(255,255,255,0.08)", color: aiResult.position === "LONG" ? "#34d399" : aiResult.position === "SHORT" ? "#f87171" : "#94a3b8" } }, aiResult.position),
+              h("div", { style: { fontSize: 10, color: "#64748b", marginTop: 6 } }, "Confidence: ", h("span", { style: { color: "#e2e8f0", fontWeight: 700 } }, aiResult.confidence + "%")),
+            ),
+          ),
+        ),
+
+        // Targets
+        h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 12 } },
+          [
+            { l: "Entry", v: aiResult.entry, c: "#a5b4fc" },
+            { l: "Stop Loss", v: aiResult.stopLoss, c: "#f87171" },
+            { l: "Target 1", v: aiResult.target1, c: "#34d399" },
+            { l: "Target 2", v: aiResult.target2, c: "#22c55e" },
+            { l: "Target 3", v: aiResult.target3, c: "#10b981" },
+            { l: "Timeframe", v: aiResult.timeframe, c: "#94a3b8" },
+          ].map((t, i) => h("div", { key: i, style: { padding: "8px 6px", borderRadius: 8, textAlign: "center", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" } },
+            h("div", { style: { fontSize: 8, color: "#64748b", fontWeight: 600, marginBottom: 2 } }, t.l),
+            h("div", { style: { fontSize: 11, fontWeight: 700, color: t.c } }, t.v || "—"),
+          )),
+        ),
+
+        // Key levels
+        aiResult.keyLevels && h("div", { style: { display: "flex", gap: 6, marginBottom: 12 } },
+          h("div", { style: { flex: 1, padding: 10, borderRadius: 8, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", textAlign: "center" } },
+            h("div", { style: { fontSize: 9, color: "#34d399", fontWeight: 600 } }, "SUPPORT"),
+            h("div", { style: { fontSize: 13, fontWeight: 700, color: "#6ee7b7" } }, aiResult.keyLevels.support),
+          ),
+          h("div", { style: { flex: 1, padding: 10, borderRadius: 8, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)", textAlign: "center" } },
+            h("div", { style: { fontSize: 9, color: "#f87171", fontWeight: 600 } }, "RESISTANCE"),
+            h("div", { style: { fontSize: 13, fontWeight: 700, color: "#fca5a5" } }, aiResult.keyLevels.resistance),
+          ),
+        ),
+
+        // Analysis sections
+        [
+          { l: "📊 Trend & MAs", t: aiResult.trendAnalysis },
+          { l: "📈 RSI", t: aiResult.rsiAnalysis },
+          { l: "📊 Stochastic", t: aiResult.stochAnalysis },
+          { l: "📉 MACD", t: aiResult.macdAnalysis },
+          { l: "🕯️ Patterns", t: aiResult.patternAnalysis },
+          { l: "🔢 Fibonacci", t: aiResult.fibAnalysis },
+          { l: "📐 Gann", t: aiResult.gannAnalysis },
+          { l: "📊 Volume", t: aiResult.volumeAnalysis },
+          { l: "📰 News", t: aiResult.newsAnalysis },
+        ].map((s, i) => s.t ? h("div", { key: i, style: { padding: 11, borderRadius: 9, marginBottom: 6, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" } },
+          h("div", { style: { fontSize: 10, fontWeight: 700, color: "#94a3b8", marginBottom: 3, fontFamily: "Inter, sans-serif" } }, s.l),
+          h("p", { style: { fontSize: 12, color: "#cbd5e1", lineHeight: 1.6, margin: 0, fontFamily: "Inter, sans-serif" } }, s.t),
+        ) : null),
+
+        // Synthesis
+        h("div", { style: { padding: 14, borderRadius: 12, marginBottom: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)" } },
+          h("div", { style: { fontSize: 11, fontWeight: 700, color: "#a5b4fc", marginBottom: 6, fontFamily: "Inter, sans-serif" } }, "🧠 AI SYNTHESIS"),
+          h("p", { style: { fontSize: 13, color: "#e2e8f0", lineHeight: 1.6, margin: 0, fontFamily: "Inter, sans-serif" } }, aiResult.reasoning),
+        ),
+
+        // Risks
+        aiResult.risks && h("div", { style: { padding: 11, borderRadius: 9, marginBottom: 8, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)" } },
+          h("div", { style: { fontSize: 10, fontWeight: 700, color: "#f87171", marginBottom: 3, fontFamily: "Inter, sans-serif" } }, "⚠️ RISKS"),
+          h("p", { style: { fontSize: 12, color: "#fca5a5", lineHeight: 1.5, margin: 0, fontFamily: "Inter, sans-serif" } }, aiResult.risks),
+        ),
+      ),
+
+      aiResult?.error && h("div", { style: { marginTop: 12, padding: 14, borderRadius: 10, textAlign: "center", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#f87171", fontSize: 13, fontFamily: "Inter, sans-serif" } }, aiResult.error),
+    ),
+
+    // Disclaimer
+    h("div", { style: { padding: "10px 14px 28px" } },
+      h("div", { style: { padding: 10, borderRadius: 8, textAlign: "center", background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.12)", fontSize: 9, color: "#a89244", lineHeight: 1.4, fontFamily: "Inter, sans-serif" } }, "⚠️ Not financial advice. AI predictions are speculative. Past performance ≠ future results. Never invest more than you can afford to lose. DYOR."),
+    ),
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>
