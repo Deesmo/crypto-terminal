@@ -553,7 +553,7 @@ Search latest ${coin.name} news, whale activity, funding rates, open interest, a
 Respond ONLY with JSON:
 {"signal":"STRONG BUY/BUY/HOLD/SELL/STRONG SELL","position":"LONG/SHORT/NEUTRAL","confidence":0-100,"entry":"price","stopLoss":"price","target1":"price","target2":"price","target3":"price","timeframe":"period","rsiAnalysis":"text","stochAnalysis":"text","macdAnalysis":"text","trendAnalysis":"text","patternAnalysis":"text","fibAnalysis":"text","gannAnalysis":"text","volumeAnalysis":"text","newsAnalysis":"text","reasoning":"3-4 sentence synthesis","risks":"2 sentences","keyLevels":{"support":"price","resistance":"price"}}`;
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/analyze", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, tools: [{ type: "web_search_20250305", name: "web_search" }], messages: [{ role: "user", content: prompt }] }),
       });
